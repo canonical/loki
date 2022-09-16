@@ -207,6 +207,22 @@ func (f *FSObjectClient) DeleteChunksBefore(ctx context.Context, ts time.Time) e
 	})
 }
 
+//  ...
+func (f *FSObjectClient) DeleteChunksBasedOnBlockSize(ctx context.Context) error {
+	diskUsage, error := DiskUsage(f.cfg.Directory)
+
+	if error != nil {
+		return error
+	}
+
+	if diskUsage.UsedPercent >= float64(f.cfg.SizeBasedRetentionPercentage) {
+		// Remove old chunks here
+		return nil
+	}
+
+	return nil
+}
+
 // IsObjectNotFoundErr returns true if error means that object is not found. Relevant to GetObject and DeleteObject operations.
 func (f *FSObjectClient) IsObjectNotFoundErr(err error) bool {
 	return os.IsNotExist(errors.Cause(err))
