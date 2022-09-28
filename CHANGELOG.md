@@ -19,6 +19,7 @@
 * [6179](https://github.com/grafana/loki/pull/6179) **chaudum**: Add new HTTP endpoint to delete ingester ring token file and shutdown process gracefully
 * [5997](https://github.com/grafana/loki/pull/5997) **simonswine**: Querier: parallize label queries to both stores.
 * [5406](https://github.com/grafana/loki/pull/5406) **ctovena**: Revise the configuration parameters that configure the usage report to grafana.com.
+* [7263](https://github.com/grafana/loki/pull/7263) **bboreham**: Dependencies: klauspost/compress package to v1.15.11; improves performance.
 
 ##### Fixes
 * [7040](https://github.com/grafana/loki/pull/7040) **bakunowski**: Remove duplicated `loki_boltdb_shipper` prefix from `tables_upload_operation_total` metric.
@@ -37,8 +38,9 @@
 #### Promtail
 
 ##### Enhancements
+
+* [6708](https://github.com/grafana/loki/pull/6708) **DylanGuedes**: Add compressed files support to Promtail.
 * [5977](https://github.com/grafana/loki/pull/5977) **juissi-t** lambda-promtail: Add support for Kinesis data stream events
-* [6395](https://github.com/grafana/loki/pull/6395) **DylanGuedes**: Add encoding support
 * [6828](https://github.com/grafana/loki/pull/6828) **alexandre1984rj** Add the BotScore and BotScoreSrc fields once the Cloudflare API returns those two fields on the list of all available log fields.
 * [6656](https://github.com/grafana/loki/pull/6656) **carlospeon**: Allow promtail to add matches to the journal reader
 
@@ -117,6 +119,7 @@ Here is the list with the changes that were produced since the previous release.
 * [6102](https://github.com/grafana/loki/pull/6102) **timchenko-a**: Add multi-tenancy support to lambda-promtail.
 * [6099](https://github.com/grafana/loki/pull/6099) **cstyan**: Drop lines with malformed JSON in Promtail JSON pipeline stage.
 * [5715](https://github.com/grafana/loki/pull/5715) **chaudum**: Allow promtail to push RFC5424 formatted syslog messages
+* [6395](https://github.com/grafana/loki/pull/6395) **DylanGuedes**: Add encoding support
 
 ##### Fixes
 * [6034](https://github.com/grafana/loki/pull/6034) **DylanGuedes**: Promtail: Fix symlink tailing behavior.
