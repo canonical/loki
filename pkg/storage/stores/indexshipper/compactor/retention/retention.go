@@ -17,7 +17,6 @@ import (
 	"github.com/grafana/loki/pkg/chunkenc"
 	"github.com/grafana/loki/pkg/storage/chunk"
 	"github.com/grafana/loki/pkg/storage/chunk/client"
-	util_storage "github.com/grafana/loki/pkg/util"
 	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
@@ -103,18 +102,12 @@ func NewSizeBasedRetentionCleaner(workingDirectory string, expiration Expiration
 }
 
 func (c *SizeBasedRetentionCleaner) RunIteration(ctx context.Context) error {
-	diskUsage, err := util_storage.DiskUsage("/tmp") // FIXME: We need to get SizeBasedRetentionPercentage from FSConfig
-	level.Info(util_log.Logger).Log("msg", "Detected disk usage percentage", "diskUsage", diskUsage)
-	// percentage := c.cfg.RetentionDiskSpacePercentage
+	// FIXME: We need to get Directory SizeBasedRetentionPercentage from FSConfig
+	error := DeleteChunksBasedOnBlockSize(ctx, "/tmp/loki/chunks", 28)
 
-	if err != nil {
-		level.Error(util_log.Logger).Log("msg", "error enforcing block size filesystem retention", "err", err)
+	if error != nil {
+		level.Error(util_log.Logger).Log("msg", "error enforcing block size filesystem retention", "err", error)
 	}
-
-	/* err := m.bucketClient.DeleteChunksBasedOnBlockSize(ctx, diskUsage)
-	if err != nil {
-		level.Error(util_log.Logger).Log("msg", "error enforcing block size filesystem retention", "err", err)
-	} */
 
 	// don't return error, otherwise timer service would stop.
 	return nil
