@@ -5,8 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/grafana/dskit/services"
 	"time"
+
+	"github.com/grafana/dskit/services"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -17,6 +18,7 @@ import (
 	"github.com/grafana/loki/pkg/chunkenc"
 	"github.com/grafana/loki/pkg/storage/chunk"
 	"github.com/grafana/loki/pkg/storage/chunk/client"
+	"github.com/grafana/loki/pkg/storage/chunk/client/local"
 	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
@@ -89,10 +91,10 @@ type SizeBasedRetentionCleaner struct {
 }
 
 func NewSizeBasedRetentionCleaner(workingDirectory string, expiration ExpirationChecker, chunkClient client.Client,
-	cleanupThreshold int, r prometheus.Registerer) (*SizeBasedRetentionCleaner, error) {
+	cleanupThreshold int, r prometheus.Registerer, fsconfig local.FSConfig) (*SizeBasedRetentionCleaner, error) {
 	metrics := newCleanupMetrics(r)
 	return &SizeBasedRetentionCleaner{
-		workingDirectory:      workingDirectory,
+		workingDirectory:      fsconfig.Directory,
 		expiration:            expiration,
 		cleanupMetrics:        metrics,
 		chunkClient:           chunkClient,
@@ -102,8 +104,7 @@ func NewSizeBasedRetentionCleaner(workingDirectory string, expiration Expiration
 }
 
 func (c *SizeBasedRetentionCleaner) RunIteration(ctx context.Context) error {
-	// FIXME: We need to get Directory and SizeBasedRetentionPercentage from FSConfig or should we get these values from other places.
-	error := DeleteChunksBasedOnBlockSize(ctx, "/tmp/loki/chunks", 28)
+	error := DeleteChunksBasedOnBlockSize(ctx, c.workingDirectory, c.cleanupThreshold)
 
 	if error != nil {
 		level.Error(util_log.Logger).Log("msg", "error enforcing block size filesystem retention", "err", error)

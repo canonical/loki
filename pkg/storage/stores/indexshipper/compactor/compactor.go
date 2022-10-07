@@ -160,6 +160,7 @@ type Compactor struct {
 	wg                    sync.WaitGroup
 	indexCompactors       map[string]IndexCompactor
 	schemaConfig          config.SchemaConfig
+	fsConfig              local.FSConfig
 
 	// Ring used for running a single compactor
 	ringLifecycler *ring.BasicLifecycler
@@ -171,7 +172,7 @@ type Compactor struct {
 	subservicesWatcher *services.FailureWatcher
 }
 
-func NewCompactor(cfg Config, objectClient client.ObjectClient, schemaConfig config.SchemaConfig, limits *validation.Overrides, r prometheus.Registerer) (*Compactor, error) {
+func NewCompactor(cfg Config, objectClient client.ObjectClient, schemaConfig config.SchemaConfig, limits *validation.Overrides, r prometheus.Registerer, fsconfig local.FSConfig) (*Compactor, error) {
 	retentionEnabledStats.Set("false")
 	if cfg.RetentionEnabled {
 		retentionEnabledStats.Set("true")
@@ -188,6 +189,7 @@ func NewCompactor(cfg Config, objectClient client.ObjectClient, schemaConfig con
 		ringPollPeriod:  5 * time.Second,
 		indexCompactors: map[string]IndexCompactor{},
 		schemaConfig:    schemaConfig,
+		fsConfig:        fsconfig,
 	}
 
 	ringStore, err := kv.NewClient(
@@ -270,7 +272,7 @@ func (c *Compactor) init(objectClient client.ObjectClient, schemaConfig config.S
 
 		if c.cfg.SharedStoreType == config.StorageTypeFileSystem {
 			c.sizeBasedRetention, err = retention.NewSizeBasedRetentionCleaner(retentionWorkDir, c.expirationChecker, chunkClient,
-				c.cfg.RetentionDiskSpacePercentage, r)
+				c.cfg.RetentionDiskSpacePercentage, r, c.fsConfig)
 		}
 		if err != nil {
 			return err
