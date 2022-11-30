@@ -146,21 +146,22 @@ func (cfg *Config) Validate() error {
 type Compactor struct {
 	services.Service
 
-	cfg                   Config
-	indexStorageClient    shipper_storage.Client
-	tableMarker           retention.TableMarker
-	sweeper               *retention.Sweeper
-	deleteRequestsStore   deletion.DeleteRequestsStore
-	DeleteRequestsHandler *deletion.DeleteRequestHandler
-	deleteRequestsManager *deletion.DeleteRequestsManager
-	expirationChecker     retention.ExpirationChecker
-	sizeBasedRetention    *retention.SizeBasedRetentionCleaner
-	metrics               *metrics
-	running               bool
-	wg                    sync.WaitGroup
-	indexCompactors       map[string]IndexCompactor
-	schemaConfig          config.SchemaConfig
-	fsConfig              local.FSConfig
+	cfg                       Config
+	indexStorageClient        shipper_storage.Client
+	tableMarker               retention.TableMarker
+	sweeper                   *retention.Sweeper
+	deleteRequestsStore       deletion.DeleteRequestsStore
+	DeleteRequestsHandler     *deletion.DeleteRequestHandler
+	DeleteRequestsGRPCHandler *deletion.GRPCRequestHandler
+	deleteRequestsManager     *deletion.DeleteRequestsManager
+	expirationChecker         retention.ExpirationChecker
+	sizeBasedRetention        *retention.SizeBasedRetentionCleaner
+	metrics                   *metrics
+	running                   bool
+	wg                        sync.WaitGroup
+	indexCompactors           map[string]IndexCompactor
+	schemaConfig              config.SchemaConfig
+	fsConfig                  local.FSConfig
 
 	// Ring used for running a single compactor
 	ringLifecycler *ring.BasicLifecycler
@@ -296,6 +297,8 @@ func (c *Compactor) initDeletes(r prometheus.Registerer, limits *validation.Over
 		c.cfg.DeleteMaxInterval,
 		r,
 	)
+
+	c.DeleteRequestsGRPCHandler = deletion.NewGRPCRequestHandler(c.deleteRequestsStore, limits)
 
 	c.deleteRequestsManager = deletion.NewDeleteRequestsManager(
 		c.deleteRequestsStore,
