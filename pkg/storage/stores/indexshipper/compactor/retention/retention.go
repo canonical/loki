@@ -74,6 +74,12 @@ type IndexProcessor interface {
 	SeriesCleaner
 }
 
+type CompactionIndexMap struct {
+	Path           string
+	Size           int64
+	CompactedIndex IndexProcessor
+}
+
 var errNoChunksFound = errors.New("no chunks found in table, please check if there are really no chunks and manually drop the table or " +
 	"see if there is a bug causing us to drop whole index table")
 
@@ -85,7 +91,7 @@ type TableMarker interface {
 type Marker struct {
 	workingDirectory string
 	expiration       ExpirationChecker
-	markerMetrics    *markerMetrics
+	markerMetrics    *MarkerMetrics
 	chunkClient      client.Client
 	markTimeout      time.Duration
 }

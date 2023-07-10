@@ -91,11 +91,13 @@ func (s *Storage) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 }
 
 type FilesystemConfig struct {
-	ChunksDirectory string `yaml:"chunks_directory"`
-	RulesDirectory  string `yaml:"rules_directory"`
+	ChunksDirectory         string `yaml:"chunks_directory"`
+	RulesDirectory          string `yaml:"rules_directory"`
+	RetentionDiskPercentage int    `yaml:"retention_disk_percentage"`
 }
 
 func (cfg *FilesystemConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	f.StringVar(&cfg.ChunksDirectory, prefix+"filesystem.chunk-directory", "", "Directory to store chunks in.")
 	f.StringVar(&cfg.RulesDirectory, prefix+"filesystem.rules-directory", "", "Directory to store rules in.")
+	f.IntVar(&cfg.RetentionDiskPercentage, prefix+"filesystem.retention-disk-percentage", 80, "Retention threshold based on disk size")
 }

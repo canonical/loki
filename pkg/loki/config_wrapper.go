@@ -459,6 +459,8 @@ func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 			r.Ruler.StoreConfig.Type = "local"
 			r.Ruler.StoreConfig.Local = local.Config{Directory: r.Common.Storage.FSConfig.RulesDirectory}
 			r.StorageConfig.FSConfig.Directory = r.Common.Storage.FSConfig.ChunksDirectory
+			r.CompactorConfig.RetentionDiskPercentage = r.Common.Storage.FSConfig.RetentionDiskPercentage
+			r.CompactorConfig.SharedStoreType = config.StorageTypeFileSystem
 		}
 	}
 

@@ -80,6 +80,7 @@ type Config struct {
 	RetentionDeleteDelay      time.Duration   `yaml:"retention_delete_delay"`
 	RetentionDeleteWorkCount  int             `yaml:"retention_delete_worker_count"`
 	RetentionTableTimeout     time.Duration   `yaml:"retention_table_timeout"`
+	RetentionDiskPercentage   int             `yaml:"retention_disk_percentage"`
 	DeleteRequestStore        string          `yaml:"delete_request_store"`
 	DefaultDeleteRequestStore string          `yaml:"-" doc:"hidden"`
 	DeleteBatchSize           int             `yaml:"delete_batch_size"`
@@ -156,6 +157,7 @@ type Compactor struct {
 	DeleteRequestsGRPCHandler *deletion.GRPCRequestHandler
 	deleteRequestsManager     *deletion.DeleteRequestsManager
 	expirationChecker         retention.ExpirationChecker
+	sizeBasedRetentionService *retention.SizeBasedRetentionService
 	metrics                   *metrics
 	running                   bool
 	wg                        sync.WaitGroup
@@ -173,6 +175,8 @@ type Compactor struct {
 
 	// one for each object store
 	storeContainers map[string]storeContainer
+
+	compactionMtx sync.Mutex
 }
 
 type storeContainer struct {
@@ -187,7 +191,7 @@ type Limits interface {
 	DefaultLimits() *validation.Limits
 }
 
-func NewCompactor(cfg Config, objectStoreClients map[string]client.ObjectClient, schemaConfig config.SchemaConfig, limits Limits, r prometheus.Registerer) (*Compactor, error) {
+func NewCompactor(cfg Config, objectStoreClients map[string]client.ObjectClient, schemaConfig config.SchemaConfig, limits Limits, r prometheus.Registerer, fsconfig local.FSConfig) (*Compactor, error) {
 	retentionEnabledStats.Set("false")
 	if cfg.RetentionEnabled {
 		retentionEnabledStats.Set("true")
@@ -235,7 +239,23 @@ func NewCompactor(cfg Config, objectStoreClients map[string]client.ObjectClient,
 		return nil, errors.Wrap(err, "create ring client")
 	}
 
-	compactor.subservices, err = services.NewManager(compactor.ringLifecycler, compactor.ring)
+	subservices := []services.Service{
+		compactor.ringLifecycler,
+		compactor.ring,
+	}
+
+	if cfg.SharedStoreType == config.StorageTypeFileSystem {
+		compactor.sizeBasedRetentionService = retention.NewSizeBasedRetentionService(
+			util_log.Logger,
+			cfg.RetentionDiskPercentage,
+			fsconfig,
+			compactor.sizeBasedCompaction,
+		)
+		subservices = append(subservices, compactor.sizeBasedRetentionService)
+	}
+
+	compactor.subservices, err = services.NewManager(subservices...)
+
 	if err != nil {
 		return nil, err
 	}
@@ -248,6 +268,14 @@ func NewCompactor(cfg Config, objectStoreClients map[string]client.ObjectClient,
 
 	compactor.Service = services.NewBasicService(compactor.starting, compactor.loop, compactor.stopping)
 	return compactor, nil
+}
+
+func (c *Compactor) GetIndexStorageClient(key string) shipper_storage.Client {
+	if container, ok := c.storeContainers[key]; !ok {
+		return nil
+	} else {
+		return container.indexStorageClient
+	}
 }
 
 func (c *Compactor) init(objectStoreClients map[string]client.ObjectClient, schemaConfig config.SchemaConfig, limits Limits, r prometheus.Registerer) error {
@@ -284,7 +312,6 @@ func (c *Compactor) init(objectStoreClients map[string]client.ObjectClient, sche
 	for objectStoreType, objectClient := range objectStoreClients {
 		var sc storeContainer
 		sc.indexStorageClient = shipper_storage.NewIndexStorageClient(objectClient, c.cfg.SharedStoreKeyPrefix)
-
 		if c.cfg.RetentionEnabled {
 			// given that compaction can now run on multiple object stores, marker files are stored under /retention/{objectStoreType}/markers/
 			// if any markers are found in the common markers dir (/retention/markers/), copy them to the store specific dirs
@@ -405,6 +432,9 @@ func (c *Compactor) starting(ctx context.Context) (err error) {
 }
 
 func (c *Compactor) loop(ctx context.Context) error {
+	c.compactionMtx.Lock()
+	defer c.compactionMtx.Unlock()
+
 	if c.cfg.RunOnce {
 		level.Info(util_log.Logger).Log("msg", "running single compaction")
 		err := c.RunCompaction(ctx, false)
@@ -479,6 +509,102 @@ func (c *Compactor) loop(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *Compactor) sizeBasedCompaction(ctx context.Context, threshold int, directory string) error {
+	c.compactionMtx.Lock()
+	defer c.compactionMtx.Unlock()
+
+	container, ok := c.storeContainers["filesystem"]
+
+	if !ok {
+		return errors.New("could not find any filesystem store")
+	}
+
+	index := container.indexStorageClient
+	index.RefreshIndexTableNamesCache(ctx)
+	tables, err := index.ListTables(ctx)
+
+	if err != nil {
+		_ = level.Error(util_log.Logger).Log("msg", "Failed to list tables for size-based compaction", "err", err)
+		return nil
+	}
+
+	details, err := c.buildCompactedIndexDetails(ctx, tables, c.cfg.WorkingDirectory, index)
+	if err != nil {
+		_ = level.Error(util_log.Logger).Log("msg", "could not get compacted index details", "err", err)
+		return err
+	}
+	_ = level.Info(util_log.Logger).Log("msg", "fetched compacted index details")
+
+	for name, idx := range details {
+		_ = level.Info(util_log.Logger).Log("msg", "details for index", "index", name, "path", idx.Path, "size", idx.Size, "compacted", idx.CompactedIndex)
+	}
+	return nil
+}
+
+func (c *Compactor) buildCompactedIndexDetails(ctx context.Context, tables []string, workingDir string, index shipper_storage.Client) ([]retention.CompactionIndexMap, error) {
+	var indexes []retention.CompactionIndexMap
+	for _, t := range tables {
+		if t == deletion.DeleteRequestsTableName {
+			continue
+		}
+		indexFiles, _, err := index.ListFiles(ctx, t, true)
+		if err != nil {
+			_ = level.Info(util_log.Logger).Log("msg", "this is the listing #1 failing")
+
+			return nil, err
+		}
+		for _, f := range indexFiles {
+			is, err := newCommonIndexSet(ctx, t,
+				shipper_storage.NewIndexSet(index, false),
+				filepath.Join(workingDir, c.cfg.SharedStoreKeyPrefix, t),
+				util_log.Logger)
+
+			if err != nil {
+				_ = level.Info(util_log.Logger).Log("msg", "this is the index set failing")
+				return nil, err
+			}
+
+			if len(is.ListSourceFiles()) != 1 {
+				continue
+			}
+
+			downloadedAt, err := is.GetSourceFile(is.ListSourceFiles()[0])
+			if err != nil {
+				_ = level.Info(util_log.Logger).Log("msg", "this is the listing #2 failing")
+				return nil, err
+			}
+
+			schemaCfg, ok := schemaPeriodForTable(c.schemaConfig, t)
+			indexCompactor, ok := c.indexCompactors[schemaCfg.IndexType]
+			if !ok {
+				return nil, fmt.Errorf("index processor not found for index type %s", schemaCfg.IndexType)
+			}
+
+			compactedIndexFile, err := indexCompactor.OpenCompactedIndexFile(ctx,
+				downloadedAt, t, is.userID, filepath.Join(is.workingDir, is.userID), schemaCfg, is.logger)
+			if err != nil {
+				_ = level.Info(util_log.Logger).Log("msg", "this is the open failing")
+				return nil, err
+			}
+
+			is.setCompactedIndex(compactedIndexFile, false, false)
+
+			stat, err := os.Lstat(is.workingDir + "/" + f.Name)
+			if err != nil {
+				_ = level.Info(util_log.Logger).Log("msg", "this is the lstat failing")
+				return nil, err
+			}
+
+			indexes = append(indexes, retention.CompactionIndexMap{
+				Path:           stat.Name(),
+				Size:           stat.Size(),
+				CompactedIndex: is.compactedIndex,
+			})
+		}
+	}
+	return indexes, nil
 }
 
 func (c *Compactor) runCompactions(ctx context.Context) {
