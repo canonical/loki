@@ -651,14 +651,7 @@ func (c *Compactor) RunCompaction(ctx context.Context, applyRetention bool) erro
 
 	// process most recent tables first
 	sortTablesByRange(tables)
-	err = c.CompactTables(ctx, c.expirationChecker, c.tableMarker, applyRetention, tables)
-	if err != nil {
-		status = statusFailure
-	}
-	return err
-}
 
-func (c *Compactor) CompactTables(ctx context.Context, expirationChecker retention.ExpirationChecker, tableMarker *retention.Marker, applyRetention bool, tables []string) errors {
 	// apply passed in compaction limits
 	if c.cfg.SkipLatestNTables <= len(tables) {
 		tables = tables[c.cfg.SkipLatestNTables:]
@@ -858,6 +851,7 @@ func (c *Compactor) RunSizeBasedCompaction(ctx context.Context, applyRetention b
 			tables[chunkSchema.IndexTables.TableFor(ref.From)] = true
 		}
 
+		var tablesToCompact []string
 		for table, _ := range tables {
 			tablesToCompact = append(tablesToCompact, table)
 		}
