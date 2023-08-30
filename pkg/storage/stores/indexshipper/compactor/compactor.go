@@ -721,8 +721,9 @@ func (c *Compactor) RunCompaction(ctx context.Context, applyRetention bool) erro
 }
 
 type TablesAndClient struct {
-	tables []string
-	client shipper_storage.Client
+	tables    []string
+	client    shipper_storage.Client
+	container storeContainer
 }
 
 func (c *Compactor) RunSizeBasedCompaction(ctx context.Context, applyRetention bool) error {
@@ -757,7 +758,7 @@ func (c *Compactor) RunSizeBasedCompaction(ctx context.Context, applyRetention b
 			return fmt.Errorf("failed to list tables: %w", err)
 		}
 
-		storages = append(storages, TablesAndClient{tables: tbls, client: sc.indexStorageClient})
+		storages = append(storages, TablesAndClient{tables: tbls, client: sc.indexStorageClient, container: sc})
 	}
 
 	for _, s := range storages {
@@ -813,7 +814,7 @@ func (c *Compactor) RunSizeBasedCompaction(ctx context.Context, applyRetention b
 				return err
 			}
 
-			maps = append(maps, RetentionIndexMap{Path: stat.Name(), Size: stat.Size(), Index: is, Compacted: is.compactedIndex, Close: is.done, StoreContainer: s})
+			maps = append(maps, RetentionIndexMap{Path: stat.Name(), Size: stat.Size(), Index: is, Compacted: is.compactedIndex, Close: is.done, StoreContainer: s.container})
 		}
 	}
 	if len(maps) <= 0 {
@@ -835,7 +836,7 @@ func (c *Compactor) RunSizeBasedCompaction(ctx context.Context, applyRetention b
 				checker.MarkPhaseFailed()
 			}
 		}()
-		marker, err := retention.NewMarker(filepath.Join(c.cfg.WorkingDirectory, "retention"), checker, c.cfg.RetentionTableTimeout, entry.StoreContainer.chunkClient, c.metrics)
+		// marker, err := retention.NewMarker(filepath.Join(c.cfg.WorkingDirectory, "retention"), checker, c.cfg.RetentionTableTimeout, entry.StoreContainer.chunkClient, c.metrics)
 		if err != nil {
 			_ = level.Error(util_log.Logger).Log("msg", "Failed to create a new marker", "err", err)
 			return err
@@ -879,14 +880,14 @@ func (c *Compactor) buildChunkstoDelete(ctx context.Context, maps []RetentionInd
 	bytesToDelete, err := c.getBytesToDelete()
 	if err != nil {
 		_ = level.Info(util_log.Logger).Log("msg", "Failed to get bytes to delete", "err", err)
-		return []retention.ChunkRef{}, err
+		return maps, err
 	}
 
 	// var identified []ChunkRef
 	bytesDeleted := 0.0
 	scanned := 0
 
-	for i, entry := range maps {
+	for _, entry := range maps {
 		var identified []retention.ChunkRef
 
 		seriesMap := retention.NewUserSeriesMap()
@@ -917,20 +918,24 @@ func (c *Compactor) buildChunkstoDelete(ctx context.Context, maps []RetentionInd
 		})
 		if err != nil {
 			_ = level.Error(util_log.Logger).Log("msg", "could not iterate over compacted index", "err", err)
-			return []retention.ChunkRef{}, nil
+			return maps, nil
 		}
 
-		seriesMap.ForEach(func(info retention.UserSeriesInfo) error {
+		err = seriesMap.ForEach(func(info retention.UserSeriesInfo) error {
 			if !info.IsDeleted {
 				return nil
 			}
 			return entry.Compacted.CleanupSeries(info.UserID(), info.Labels)
 		})
 
-		entry.ToDelete = identified
-	}
+		if err != nil {
+			_ = level.Error(util_log.Logger).Log("msg", "could not clean up series from index", "err", err)
+			return maps, nil
+		}
 
-	_ = level.Info(util_log.Logger).Log("msg", "finished building map of chunk refs to delete", "count", len(identified), "scanned", scanned)
+		entry.ToDelete = identified
+		_ = level.Info(util_log.Logger).Log("msg", "finished building map of chunk refs to delete", "count", len(entry.ToDelete), "scanned", scanned)
+	}
 
 	return maps, nil
 }
