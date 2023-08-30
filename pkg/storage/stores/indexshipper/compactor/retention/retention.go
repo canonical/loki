@@ -162,7 +162,7 @@ func markForDelete(
 	chunkRewriter *chunkRewriter,
 	logger log.Logger,
 ) (bool, bool, error) {
-	seriesMap := newUserSeriesMap()
+	seriesMap := NewUserSeriesMap()
 	// tableInterval holds the interval for which the table is expected to have the chunks indexed
 	tableInterval := ExtractIntervalFromTableName(tableName)
 	empty := true
@@ -247,12 +247,12 @@ func markForDelete(
 		return false, false, ctx.Err()
 	}
 
-	return false, modified, seriesMap.ForEach(func(info userSeriesInfo) error {
-		if !info.isDeleted {
+	return false, modified, seriesMap.ForEach(func(info UserSeriesInfo) error {
+		if !info.IsDeleted {
 			return nil
 		}
 
-		return indexFile.CleanupSeries(info.UserID(), info.lbls)
+		return indexFile.CleanupSeries(info.UserID(), info.Labels)
 	})
 }
 

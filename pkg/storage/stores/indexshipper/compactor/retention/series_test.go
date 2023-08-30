@@ -8,7 +8,7 @@ import (
 )
 
 func Test_UserSeries(t *testing.T) {
-	m := newUserSeriesMap()
+	m := NewUserSeriesMap()
 
 	m.Add([]byte(`series1`), []byte(`user1`), nil)
 	m.Add([]byte(`series1`), []byte(`user1`), nil)
@@ -19,7 +19,7 @@ func Test_UserSeries(t *testing.T) {
 
 	keys := []string{}
 
-	err := m.ForEach(func(info userSeriesInfo) error {
+	err := m.ForEach(func(info UserSeriesInfo) error {
 		keys = append(keys, string(info.SeriesID())+":"+string(info.UserID()))
 		return nil
 	})

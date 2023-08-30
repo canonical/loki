@@ -577,7 +577,7 @@ func TestCompactor_Compact(t *testing.T) {
 
 					require.NoError(t, tCompactor.CompactTable())
 
-					// verify that we have CompactedIndex for numUsers
+					// verify that we have compactedIndex for numUsers
 					require.Len(t, tCompactor.compactedIndexes, tc.expectedNumCompactedIndexes)
 					for userID, compactedIdx := range tCompactor.compactedIndexes {
 						require.Equal(t, tc.shouldRemoveUserSourceIndexes, initializedIndexSets[userID].(*mockIndexSet).removeSourceFiles)

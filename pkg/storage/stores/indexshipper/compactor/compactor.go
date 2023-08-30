@@ -4,12 +4,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/grafana/loki/pkg/storage/chunk"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/flagext"
@@ -38,9 +41,9 @@ import (
 // 1. Find the index type from table name using schemaPeriodForTable.
 // 2. Find the registered IndexCompactor for the index type.
 // 3. Build an instance of TableCompactor using IndexCompactor.NewIndexCompactor, with all the required information to do a compaction.
-// 4. Run the compaction using TableCompactor.Compact, which would set the new/updated CompactedIndex for each IndexSet.
-// 5. If retention is enabled, run retention on the CompactedIndex using its retention.IndexProcessor implementation.
-// 6. Convert the CompactedIndex to a file using the IndexCompactor.ToIndexFile for uploading.
+// 4. Run the compaction using TableCompactor.Compact, which would set the new/updated compactedIndex for each IndexSet.
+// 5. If retention is enabled, run retention on the compactedIndex using its retention.IndexProcessor implementation.
+// 6. Convert the compactedIndex to a file using the IndexCompactor.ToIndexFile for uploading.
 // 7. If we uploaded successfully, delete the old index files.
 
 const (
@@ -161,6 +164,7 @@ type Compactor struct {
 	wg                        sync.WaitGroup
 	indexCompactors           map[string]IndexCompactor
 	schemaConfig              config.SchemaConfig
+	cleanupThreshold          int
 
 	// Ring used for running a single compactor
 	ringLifecycler *ring.BasicLifecycler
@@ -179,6 +183,7 @@ type storeContainer struct {
 	tableMarker        retention.TableMarker
 	sweeper            *retention.Sweeper
 	indexStorageClient shipper_storage.Client
+	chunkClient        client.Client
 }
 
 type Limits interface {
@@ -197,10 +202,11 @@ func NewCompactor(cfg Config, objectStoreClients map[string]client.ObjectClient,
 	}
 
 	compactor := &Compactor{
-		cfg:             cfg,
-		ringPollPeriod:  5 * time.Second,
-		indexCompactors: map[string]IndexCompactor{},
-		schemaConfig:    schemaConfig,
+		cfg:              cfg,
+		ringPollPeriod:   5 * time.Second,
+		indexCompactors:  map[string]IndexCompactor{},
+		schemaConfig:     schemaConfig,
+		cleanupThreshold: 10,
 	}
 
 	ringStore, err := kv.NewClient(
@@ -301,14 +307,14 @@ func (c *Compactor) init(objectStoreClients map[string]client.ObjectClient, sche
 			if _, ok := objectClient.(*local.FSObjectClient); ok {
 				encoder = client.FSEncoder
 			}
-			chunkClient := client.NewClient(objectClient, encoder, schemaConfig)
+			sc.chunkClient = client.NewClient(objectClient, encoder, schemaConfig)
 
-			sc.sweeper, err = retention.NewSweeper(retentionWorkDir, chunkClient, c.cfg.RetentionDeleteWorkCount, c.cfg.RetentionDeleteDelay, r)
+			sc.sweeper, err = retention.NewSweeper(retentionWorkDir, sc.chunkClient, c.cfg.RetentionDeleteWorkCount, c.cfg.RetentionDeleteDelay, r)
 			if err != nil {
 				return fmt.Errorf("failed to init sweeper: %w", err)
 			}
 
-			sc.tableMarker, err = retention.NewMarker(retentionWorkDir, c.expirationChecker, c.cfg.RetentionTableTimeout, chunkClient, r)
+			sc.tableMarker, err = retention.NewMarker(retentionWorkDir, c.expirationChecker, c.cfg.RetentionTableTimeout, sc.chunkClient, r)
 			if err != nil {
 				return fmt.Errorf("failed to init table marker: %w", err)
 			}
@@ -507,11 +513,13 @@ func (c *Compactor) runCompactions(ctx context.Context) {
 			applyRetention = true
 		}
 
-		err := c.RunCompaction(ctx, applyRetention)
-		if err != nil {
+		if err := c.RunCompaction(ctx, applyRetention); err != nil {
 			level.Error(util_log.Logger).Log("msg", "failed to run compaction", "err", err)
 		}
 
+		if err := c.RunSizeBasedCompaction(ctx, applyRetention); err != nil {
+			level.Error(util_log.Logger).Log("msg", "failed to run size-based compaction", "err", err)
+		}
 		if applyRetention {
 			lastRetentionRunAt = time.Now()
 		}
@@ -643,7 +651,14 @@ func (c *Compactor) RunCompaction(ctx context.Context, applyRetention bool) erro
 
 	// process most recent tables first
 	sortTablesByRange(tables)
+	err = c.CompactTables(ctx, c.expirationChecker, c.tableMarker, applyRetention, tables)
+	if err != nil {
+		status = statusFailure
+	}
+	return err
+}
 
+func (c *Compactor) CompactTables(ctx context.Context, expirationChecker retention.ExpirationChecker, tableMarker *retention.Marker, applyRetention bool, tables []string) errors {
 	// apply passed in compaction limits
 	if c.cfg.SkipLatestNTables <= len(tables) {
 		tables = tables[c.cfg.SkipLatestNTables:]
@@ -710,6 +725,248 @@ func (c *Compactor) RunCompaction(ctx context.Context, applyRetention bool) erro
 	}
 
 	return firstErr
+}
+
+type TablesAndClient struct {
+	tables []string
+	client shipper_storage.Client
+}
+
+func (c *Compactor) RunSizeBasedCompaction(ctx context.Context, applyRetention bool) error {
+	var maps []RetentionIndexMap
+
+	defer func() {
+		for _, m := range maps {
+			m.Close()
+		}
+		_ = level.Info(util_log.Logger).Log("msg", "!!!!!!!!!! SIZE BASED COMPACTION FINISHED !!!!!!!!!!")
+	}()
+	_ = level.Info(util_log.Logger).Log("msg", "!!!!!!!!!! SIZE BASED COMPACTION STARTED !!!!!!!!!!")
+
+	if !applyRetention {
+		return nil
+	}
+
+	bytesToDelete, err := c.getBytesToDelete()
+	if err != nil {
+		return err
+	}
+
+	_ = level.Info(util_log.Logger).Log("msg", "Calculated megabytes to delete to reach configured storage free space:",
+		"megabytesToDelete", fmt.Sprintf("%.2f", bytesToDelete/1024/1024))
+
+	var storages []TablesAndClient
+	for _, sc := range c.storeContainers {
+
+		sc.indexStorageClient.RefreshIndexTableNamesCache(ctx)
+		tbls, err := sc.indexStorageClient.ListTables(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list tables: %w", err)
+		}
+
+		storages = append(storages, TablesAndClient{tables: tbls, client: sc.indexStorageClient})
+	}
+
+	for _, s := range storages {
+		for _, t := range s.tables {
+			if t == deletion.DeleteRequestsTableName {
+				continue
+			}
+
+			is, err := newCommonIndexSet(ctx, t, shipper_storage.NewIndexSet(s.client, false), filepath.Join(c.cfg.WorkingDirectory, c.cfg.SharedStoreKeyPrefix, t), util_log.Logger)
+			if err != nil {
+				return err
+			}
+			sourceFiles := is.ListSourceFiles()
+
+			if len(sourceFiles) != 1 {
+				names := []string{}
+				for _, s := range sourceFiles {
+					names = append(names, s.Name)
+				}
+				_ = level.Info(util_log.Logger).Log("msg", "more than one index file for table, skipping", "table-name", t, "files", strings.Join(names, ", "))
+				continue
+			}
+
+			downloadedAt, err := is.GetSourceFile(sourceFiles[0])
+			_ = level.Info(util_log.Logger).Log("msg", "fetched source file", "source-file", downloadedAt)
+
+			schemaCfg, ok := schemaPeriodForTable(c.schemaConfig, t)
+			if !ok {
+				return fmt.Errorf("schema period not found for schema config")
+			}
+
+			compactor, ok := c.indexCompactors[schemaCfg.IndexType]
+			if !ok {
+				return fmt.Errorf("index processor not found for index type %s", schemaCfg.IndexType)
+			}
+
+			stat, err := os.Lstat(downloadedAt)
+			if err != nil {
+				_ = level.Error(util_log.Logger).Log("msg", "stat of index file failed", "err", err)
+				return err
+			}
+
+			_ = level.Info(util_log.Logger).Log("msg", "stat of index file", "path", stat.Name(), "size", stat.Size(), "compacted-index", is.compactedIndex)
+			ci, err := compactor.OpenCompactedIndexFile(ctx, downloadedAt, t, is.userID, filepath.Join(is.workingDir, is.userID), schemaCfg, is.logger)
+			if err != nil {
+				_ = level.Error(util_log.Logger).Log("msg", "opening compacted index file failed", "err", err)
+				return err
+			}
+
+			err = is.SetCompactedIndex(ci, true)
+			if err != nil {
+				_ = level.Error(util_log.Logger).Log("msg", "setting compacted index failed", "err", err)
+				return err
+			}
+
+			maps = append(maps, RetentionIndexMap{Path: stat.Name(), Size: stat.Size(), Index: is, Compacted: is.compactedIndex, Close: is.done, StoreContainer: s})
+		}
+	}
+	if len(maps) <= 0 {
+		_ = level.Info(util_log.Logger).Log("msg", "no indexes qualifying for compaction. skipping")
+		return nil
+	}
+	_ = level.Info(util_log.Logger).Log("msg", "Retention Index Maps compiled", "count", len(maps))
+
+	maps, err = c.buildChunkstoDelete(ctx, maps)
+	status := statusSuccess
+
+	for _, entry := range maps {
+		checker := retention.DeletedChunksExpirationChecker(entry.ToDelete)
+		checker.MarkPhaseStarted()
+		defer func() {
+			if status == statusSuccess {
+				checker.MarkPhaseFinished()
+			} else {
+				checker.MarkPhaseFailed()
+			}
+		}()
+		marker, err := retention.NewMarker(filepath.Join(c.cfg.WorkingDirectory, "retention"), checker, c.cfg.RetentionTableTimeout, entry.StoreContainer.chunkClient, c.metrics)
+		if err != nil {
+			_ = level.Error(util_log.Logger).Log("msg", "Failed to create a new marker", "err", err)
+			return err
+		}
+		tables := make(map[string]bool)
+		for _, ref := range entry.ToDelete {
+			chunkSchema, err := c.schemaConfig.SchemaForTime(ref.From)
+			if err != nil {
+				_ = level.Error(util_log.Logger).Log("msg", "Failed to get index table from chunk ref", "err", err, "ref", ref)
+				status = statusFailure
+				break
+			}
+			tables[chunkSchema.IndexTables.TableFor(ref.From)] = true
+		}
+
+		for table, _ := range tables {
+			tablesToCompact = append(tablesToCompact, table)
+		}
+	}
+
+	if err != nil {
+		_ = level.Info(util_log.Logger).Log("msg", "Failed to build chunk refs from index maps", "err", err)
+		return err
+	}
+
+	return nil
+}
+
+type RetentionIndexMap struct {
+	Path           string
+	Size           int64
+	Index          IndexSet
+	Compacted      CompactedIndex
+	Close          func() error
+	ToDelete       []retention.ChunkRef
+	StoreContainer storeContainer
+}
+
+func (c *Compactor) buildChunkstoDelete(ctx context.Context, maps []RetentionIndexMap) ([]RetentionIndexMap, error) {
+	bytesToDelete, err := c.getBytesToDelete()
+	if err != nil {
+		_ = level.Info(util_log.Logger).Log("msg", "Failed to get bytes to delete", "err", err)
+		return []retention.ChunkRef{}, err
+	}
+
+	// var identified []ChunkRef
+	bytesDeleted := 0.0
+	scanned := 0
+
+	for i, entry := range maps {
+		var identified []retention.ChunkRef
+
+		seriesMap := retention.NewUserSeriesMap()
+
+		if bytesToDelete < bytesDeleted {
+			_ = level.Info(util_log.Logger).Log("msg", "Identified enough chunks to delete to reach target size")
+			break
+		}
+
+		err = entry.Compacted.ForEachChunk(ctx, func(ce retention.ChunkEntry) (bool, error) {
+			userID := unsafeGetString(ce.UserID)
+			chunkID := unsafeGetString(ce.ChunkID)
+			chk, err := chunk.ParseExternalKey(userID, chunkID)
+
+			if err != nil {
+				_ = level.Error(util_log.Logger).Log("msg", "could not get chunk", "err", err)
+				return false, err
+			}
+
+			seriesMap.Add(ce.SeriesID, ce.UserID, ce.Labels)
+
+			bytesToDelete += float64(chk.Size())
+			identified = append(identified, ce.ChunkRef)
+			_ = level.Info(util_log.Logger).Log("msg", "current number of chunks to delete", "count", len(identified))
+
+			return false, nil
+
+		})
+		if err != nil {
+			_ = level.Error(util_log.Logger).Log("msg", "could not iterate over compacted index", "err", err)
+			return []retention.ChunkRef{}, nil
+		}
+
+		seriesMap.ForEach(func(info retention.UserSeriesInfo) error {
+			if !info.IsDeleted {
+				return nil
+			}
+			return entry.Compacted.CleanupSeries(info.UserID(), info.Labels)
+		})
+
+		entry.ToDelete = identified
+	}
+
+	_ = level.Info(util_log.Logger).Log("msg", "finished building map of chunk refs to delete", "count", len(identified), "scanned", scanned)
+
+	return maps, nil
+}
+
+func unsafeGetString(buf []byte) string {
+	return *((*string)(unsafe.Pointer(&buf)))
+}
+
+func (c *Compactor) getBytesToDelete() (float64, error) {
+	diskUsage, err := c.getDiskUsage()
+	if err != nil {
+		return 0.0, err
+	}
+	percentageToBeDeleted := diskUsage.UsedPercent - float64(c.cleanupThreshold)
+
+	if percentageToBeDeleted < 0.0 {
+		percentageToBeDeleted = 0.0
+	}
+
+	return (percentageToBeDeleted / 100) * float64(diskUsage.All), nil
+}
+
+func (c *Compactor) getDiskUsage() (util.DiskStatus, error) {
+	usage, err := util.DiskUsage(c.cfg.WorkingDirectory)
+	if err != nil {
+		return util.DiskStatus{}, err
+	}
+	level.Info(util_log.Logger).Log("msg", "Detected disk usage percentage", "diskUsage", fmt.Sprintf("%.2f%%", usage.UsedPercent))
+
+	return usage, nil
 }
 
 type expirationChecker struct {

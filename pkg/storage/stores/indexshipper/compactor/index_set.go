@@ -26,12 +26,17 @@ type IndexSet interface {
 	GetSourceFile(indexFile storage.IndexFile) (string, error)
 	GetLogger() log.Logger
 	GetWorkingDir() string
+	GetCompactedIndex() CompactedIndex
 	// SetCompactedIndex sets the CompactedIndex for upload/applying retention and making the compactor remove the source files.
 	// CompactedIndex can be nil only in case of all the source files in common index set being compacted away to per tenant index.
 	// It would return an error if the CompactedIndex is nil and removeSourceFiles is true in case of user index set since
 	// compaction should either create new files or can be a noop if there is nothing to compact.
 	// There is no need to call SetCompactedIndex if no changes were made to the index for this IndexSet.
 	SetCompactedIndex(compactedIndex CompactedIndex, removeSourceFiles bool) error
+}
+
+func (is *indexSet) GetCompactedIndex() CompactedIndex {
+	return is.compactedIndex
 }
 
 // CompactedIndex is built by TableCompactor for IndexSet after compaction.

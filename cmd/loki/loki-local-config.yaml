@@ -4,6 +4,14 @@ server:
   http_listen_port: 3100
   grpc_listen_port: 9096
 
+compactor:
+  working_directory: /tmp/loki/retention
+  shared_store: filesystem
+  compaction_interval: 30s
+  retention_enabled: true
+  retention_delete_delay: 15s
+  retention_delete_worker_count: 150
+
 common:
   instance_addr: 127.0.0.1
   path_prefix: /tmp/loki
@@ -35,16 +43,3 @@ schema_config:
 
 ruler:
   alertmanager_url: http://localhost:9093
-
-# By default, Loki will send anonymous, but uniquely-identifiable usage and configuration
-# analytics to Grafana Labs. These statistics are sent to https://stats.grafana.org/
-#
-# Statistics help us better understand how Loki is used, and they show us performance
-# levels for most users. This helps us prioritize features and documentation.
-# For more information on what's sent, look at
-# https://github.com/grafana/loki/blob/main/pkg/usagestats/stats.go
-# Refer to the buildReport method to see what goes into a report.
-#
-# If you would like to disable reporting, uncomment the following lines:
-#analytics:
-#  reporting_enabled: false

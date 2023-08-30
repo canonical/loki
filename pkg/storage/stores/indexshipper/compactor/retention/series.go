@@ -4,34 +4,34 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 )
 
-type userSeries struct {
+type UserSeries struct {
 	key         []byte
 	seriesIDLen int
 }
 
-func newUserSeries(seriesID []byte, userID []byte) userSeries {
+func newUserSeries(seriesID []byte, userID []byte) UserSeries {
 	key := make([]byte, 0, len(seriesID)+len(userID))
 	key = append(key, seriesID...)
 	key = append(key, userID...)
-	return userSeries{
+	return UserSeries{
 		key:         key,
 		seriesIDLen: len(seriesID),
 	}
 }
 
-func (us userSeries) Key() string {
+func (us UserSeries) Key() string {
 	return unsafeGetString(us.key)
 }
 
-func (us userSeries) SeriesID() []byte {
+func (us UserSeries) SeriesID() []byte {
 	return us.key[:us.seriesIDLen]
 }
 
-func (us userSeries) UserID() []byte {
+func (us UserSeries) UserID() []byte {
 	return us.key[us.seriesIDLen:]
 }
 
-func (us *userSeries) Reset(seriesID []byte, userID []byte) {
+func (us *UserSeries) Reset(seriesID []byte, userID []byte) {
 	if us.key == nil {
 		us.key = make([]byte, 0, len(seriesID)+len(userID))
 	}
@@ -41,40 +41,40 @@ func (us *userSeries) Reset(seriesID []byte, userID []byte) {
 	us.seriesIDLen = len(seriesID)
 }
 
-type userSeriesInfo struct {
-	userSeries
-	isDeleted bool
-	lbls      labels.Labels
+type UserSeriesInfo struct {
+	UserSeries
+	IsDeleted bool
+	Labels    labels.Labels
 }
 
-type userSeriesMap map[string]userSeriesInfo
+type UserSeriesMap map[string]UserSeriesInfo
 
-func newUserSeriesMap() userSeriesMap {
-	return make(userSeriesMap)
+func NewUserSeriesMap() UserSeriesMap {
+	return make(UserSeriesMap)
 }
 
-func (u userSeriesMap) Add(seriesID []byte, userID []byte, lbls labels.Labels) {
+func (u UserSeriesMap) Add(seriesID []byte, userID []byte, lbls labels.Labels) {
 	us := newUserSeries(seriesID, userID)
 	if _, ok := u[us.Key()]; ok {
 		return
 	}
 
-	u[us.Key()] = userSeriesInfo{
-		userSeries: us,
-		isDeleted:  true,
-		lbls:       lbls,
+	u[us.Key()] = UserSeriesInfo{
+		UserSeries: us,
+		IsDeleted:  true,
+		Labels:     lbls,
 	}
 }
 
 // MarkSeriesNotDeleted is used to mark series not deleted when it still has some chunks left in the store
-func (u userSeriesMap) MarkSeriesNotDeleted(seriesID []byte, userID []byte) {
+func (u UserSeriesMap) MarkSeriesNotDeleted(seriesID []byte, userID []byte) {
 	us := newUserSeries(seriesID, userID)
 	usi := u[us.Key()]
-	usi.isDeleted = false
+	usi.IsDeleted = false
 	u[us.Key()] = usi
 }
 
-func (u userSeriesMap) ForEach(callback func(info userSeriesInfo) error) error {
+func (u UserSeriesMap) ForEach(callback func(info UserSeriesInfo) error) error {
 	for _, v := range u {
 		if err := callback(v); err != nil {
 			return err

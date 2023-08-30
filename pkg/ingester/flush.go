@@ -164,7 +164,6 @@ func (i *Ingester) flushUserSeries(userID string, fp model.Fingerprint, immediat
 	}
 
 	lbs := labels.String()
-	level.Info(util_log.Logger).Log("msg", "flushing stream", "user", userID, "fp", fp, "immediate", immediate, "num_chunks", len(chunks), "labels", lbs)
 
 	ctx := user.InjectOrgID(context.Background(), userID)
 	ctx, cancel := context.WithTimeout(ctx, i.cfg.FlushOpTimeout)
